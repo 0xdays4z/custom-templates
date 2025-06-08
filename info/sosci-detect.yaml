@@ -1,0 +1,23 @@
+id: SoSci-detect
+
+info:
+  name: SoSci detect
+  author: w00lfff
+  severity: info
+  tags: detect
+
+requests:
+  - method: GET
+    path:
+      - "{{BaseURL}}/admin/index.php?o=1"
+
+    matchers-condition: and
+    matchers:
+      - type: word
+        words:
+          - "SoSciTools.attachEvent"
+        part: body
+
+      - type: status
+        status:
+          - 200

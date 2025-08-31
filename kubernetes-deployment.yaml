@@ -1,0 +1,704 @@
+# Porsche Security Testing Suite - Kubernetes Deployment
+# Enterprise-grade deployment with high availability and scaling
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: porsche-security
+  labels:
+    name: porsche-security
+    environment: production
+
+---
+# ConfigMap for application configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: porsche-security-config
+  namespace: porsche-security
+data:
+  security-suite.conf: |
+    # Porsche Security Testing Suite Configuration
+    ENVIRONMENT=production
+    DEBUG_MODE=false
+    LOG_LEVEL=info
+    
+    # Security settings
+    ENABLE_REAL_TIME_MONITORING=true
+    ENABLE_AUTOMATED_REPORTING=true
+    ENABLE_CRITICAL_ALERTS=true
+    
+    # API endpoints
+    SECURITY_TEAM_ENDPOINT=https://security-team.porsche.com/alerts
+    REPORT_ENDPOINT=https://security-team.porsche.com/reports
+    WEBHOOK_ENDPOINT=https://security-team.porsche.com/webhooks
+    
+    # Testing configuration
+    RUN_COMPREHENSIVE_SCAN_INTERVAL=86400
+    RUN_QUICK_SCAN_INTERVAL=3600
+    ENABLE_PARALLEL_TESTING=true
+    MAX_CONCURRENT_TESTS=10
+    
+    # Database settings
+    DB_HOST=postgres-service
+    DB_PORT=5432
+    DB_NAME=porsche_security
+    DB_USER=security_user
+    
+    # Redis settings
+    REDIS_HOST=redis-service
+    REDIS_PORT=6379
+    
+    # SSL/TLS settings
+    SSL_CERT_PATH=/etc/ssl/certs/tls.crt
+    SSL_KEY_PATH=/etc/ssl/private/tls.key
+
+---
+# Secret for sensitive configuration
+apiVersion: v1
+kind: Secret
+metadata:
+  name: porsche-security-secrets
+  namespace: porsche-security
+type: Opaque
+data:
+  db-password: cG9yc2NoZV9zZWN1cml0eV9kYl9wYXNzd29yZA==  # base64 encoded
+  redis-password: cG9yc2NoZV9zZWN1cml0eV9yZWRpc19wYXNzd29yZA==  # base64 encoded
+  jwt-secret: cG9yc2NoZV9zZWN1cml0eV9qd3Rfc2VjcmV0  # base64 encoded
+  slack-webhook: aHR0cHM6Ly9ob29rcy5zbGFjay5jb20vc2VydmljZXMvVDAuLi4=  # base64 encoded
+
+---
+# TLS Secret for SSL certificates
+apiVersion: v1
+kind: Secret
+metadata:
+  name: porsche-security-tls
+  namespace: porsche-security
+type: kubernetes.io/tls
+data:
+  tls.crt: LS0tLS1CRUdJTi... # base64 encoded certificate
+  tls.key: LS0tLS1CRUdJTi... # base64 encoded private key
+
+---
+# Persistent Volume Claim for logs
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: security-logs-pvc
+  namespace: porsche-security
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 10Gi
+  storageClassName: fast-ssd
+
+---
+# Persistent Volume Claim for reports
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: security-reports-pvc
+  namespace: porsche-security
+spec:
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 50Gi
+  storageClassName: fast-ssd
+
+---
+# PostgreSQL StatefulSet
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  namespace: porsche-security
+spec:
+  serviceName: postgres-service
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+      - name: postgres
+        image: postgres:15-alpine
+        ports:
+        - containerPort: 5432
+        env:
+        - name: POSTGRES_DB
+          value: porsche_security
+        - name: POSTGRES_USER
+          value: security_user
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: porsche-security-secrets
+              key: db-password
+        - name: POSTGRES_INITDB_ARGS
+          value: "--auth-host=scram-sha-256"
+        volumeMounts:
+        - name: postgres-storage
+          mountPath: /var/lib/postgresql/data
+        - name: init-scripts
+          mountPath: /docker-entrypoint-initdb.d
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+          limits:
+            memory: "2Gi"
+            cpu: "1000m"
+        livenessProbe:
+          exec:
+            command:
+            - pg_isready
+            - -U
+            - security_user
+            - -d
+            - porsche_security
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          exec:
+            command:
+            - pg_isready
+            - -U
+            - security_user
+            - -d
+            - porsche_security
+          initialDelaySeconds: 5
+          periodSeconds: 5
+      volumes:
+      - name: init-scripts
+        configMap:
+          name: postgres-init-scripts
+  volumeClaimTemplates:
+  - metadata:
+      name: postgres-storage
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      resources:
+        requests:
+          storage: 20Gi
+      storageClassName: fast-ssd
+
+---
+# PostgreSQL Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-service
+  namespace: porsche-security
+spec:
+  selector:
+    app: postgres
+  ports:
+  - port: 5432
+    targetPort: 5432
+  type: ClusterIP
+
+---
+# Redis Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  namespace: porsche-security
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+    spec:
+      containers:
+      - name: redis
+        image: redis:7-alpine
+        ports:
+        - containerPort: 6379
+        command:
+        - redis-server
+        - --requirepass
+        - $(REDIS_PASSWORD)
+        env:
+        - name: REDIS_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: porsche-security-secrets
+              key: redis-password
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        livenessProbe:
+          exec:
+            command:
+            - redis-cli
+            - ping
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          exec:
+            command:
+            - redis-cli
+            - ping
+          initialDelaySeconds: 5
+          periodSeconds: 5
+
+---
+# Redis Service
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-service
+  namespace: porsche-security
+spec:
+  selector:
+    app: redis
+  ports:
+  - port: 6379
+    targetPort: 6379
+  type: ClusterIP
+
+---
+# Main Security Suite Deployment
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: porsche-security-suite
+  namespace: porsche-security
+  labels:
+    app: porsche-security-suite
+    version: v1.0.0
+spec:
+  replicas: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: porsche-security-suite
+  template:
+    metadata:
+      labels:
+        app: porsche-security-suite
+        version: v1.0.0
+    spec:
+      serviceAccountName: porsche-security-service-account
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        fsGroup: 1001
+      containers:
+      - name: security-suite
+        image: porsche/security-suite:1.0.0
+        ports:
+        - containerPort: 3000
+          name: api
+        - containerPort: 8443
+          name: dashboard
+        env:
+        - name: NODE_ENV
+          value: "production"
+        - name: CONFIG_FILE
+          value: "/etc/porsche-security/security-suite.conf"
+        - name: DB_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: porsche-security-secrets
+              key: db-password
+        - name: REDIS_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: porsche-security-secrets
+              key: redis-password
+        - name: JWT_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: porsche-security-secrets
+              key: jwt-secret
+        - name: SLACK_WEBHOOK_URL
+          valueFrom:
+            secretKeyRef:
+              name: porsche-security-secrets
+              key: slack-webhook
+        volumeMounts:
+        - name: config-volume
+          mountPath: /etc/porsche-security
+          readOnly: true
+        - name: tls-certs
+          mountPath: /etc/ssl/certs
+          readOnly: true
+        - name: tls-private
+          mountPath: /etc/ssl/private
+          readOnly: true
+        - name: logs-volume
+          mountPath: /var/log/porsche-security
+        - name: reports-volume
+          mountPath: /app/reports
+        resources:
+          requests:
+            memory: "1Gi"
+            cpu: "500m"
+          limits:
+            memory: "4Gi"
+            cpu: "2000m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 3000
+            scheme: HTTP
+          initialDelaySeconds: 60
+          periodSeconds: 30
+          timeoutSeconds: 10
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 3000
+            scheme: HTTP
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        startupProbe:
+          httpGet:
+            path: /health
+            port: 3000
+            scheme: HTTP
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 30
+      volumes:
+      - name: config-volume
+        configMap:
+          name: porsche-security-config
+      - name: tls-certs
+        secret:
+          secretName: porsche-security-tls
+          items:
+          - key: tls.crt
+            path: tls.crt
+      - name: tls-private
+        secret:
+          secretName: porsche-security-tls
+          items:
+          - key: tls.key
+            path: tls.key
+      - name: logs-volume
+        persistentVolumeClaim:
+          claimName: security-logs-pvc
+      - name: reports-volume
+        persistentVolumeClaim:
+          claimName: security-reports-pvc
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchExpressions:
+                - key: app
+                  operator: In
+                  values:
+                  - porsche-security-suite
+              topologyKey: kubernetes.io/hostname
+
+---
+# Service Account
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: porsche-security-service-account
+  namespace: porsche-security
+
+---
+# ClusterRole for security suite
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: porsche-security-role
+rules:
+- apiGroups: [""]
+  resources: ["pods", "services", "endpoints"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["apps"]
+  resources: ["deployments", "replicasets"]
+  verbs: ["get", "list", "watch"]
+- apiGroups: ["networking.k8s.io"]
+  resources: ["ingresses"]
+  verbs: ["get", "list", "watch"]
+
+---
+# ClusterRoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: porsche-security-binding
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: porsche-security-role
+subjects:
+- kind: ServiceAccount
+  name: porsche-security-service-account
+  namespace: porsche-security
+
+---
+# Service for Security Suite
+apiVersion: v1
+kind: Service
+metadata:
+  name: porsche-security-service
+  namespace: porsche-security
+  labels:
+    app: porsche-security-suite
+spec:
+  selector:
+    app: porsche-security-suite
+  ports:
+  - name: api
+    port: 3000
+    targetPort: 3000
+    protocol: TCP
+  - name: dashboard
+    port: 8443
+    targetPort: 8443
+    protocol: TCP
+  type: ClusterIP
+
+---
+# Ingress for external access
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: porsche-security-ingress
+  namespace: porsche-security
+  annotations:
+    kubernetes.io/ingress.class: nginx
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/backend-protocol: "HTTPS"
+    nginx.ingress.kubernetes.io/auth-type: basic
+    nginx.ingress.kubernetes.io/auth-secret: porsche-security-auth
+    nginx.ingress.kubernetes.io/auth-realm: "Porsche Security Dashboard"
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+spec:
+  tls:
+  - hosts:
+    - security.porsche.com
+    secretName: porsche-security-tls-ingress
+  rules:
+  - host: security.porsche.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: porsche-security-service
+            port:
+              number: 8443
+      - path: /api
+        pathType: Prefix
+        backend:
+          service:
+            name: porsche-security-service
+            port:
+              number: 3000
+
+---
+# HorizontalPodAutoscaler
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: porsche-security-hpa
+  namespace: porsche-security
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: porsche-security-suite
+  minReplicas: 3
+  maxReplicas: 10
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
+  behavior:
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+      - type: Percent
+        value: 10
+        periodSeconds: 60
+    scaleUp:
+      stabilizationWindowSeconds: 60
+      policies:
+      - type: Percent
+        value: 50
+        periodSeconds: 60
+
+---
+# PodDisruptionBudget
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: porsche-security-pdb
+  namespace: porsche-security
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: porsche-security-suite
+
+---
+# NetworkPolicy for security
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: porsche-security-network-policy
+  namespace: porsche-security
+spec:
+  podSelector:
+    matchLabels:
+      app: porsche-security-suite
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          name: ingress-nginx
+    ports:
+    - protocol: TCP
+      port: 3000
+    - protocol: TCP
+      port: 8443
+  - from:
+    - podSelector:
+        matchLabels:
+          app: porsche-security-suite
+    ports:
+    - protocol: TCP
+      port: 3000
+  egress:
+  - to:
+    - podSelector:
+        matchLabels:
+          app: postgres
+    ports:
+    - protocol: TCP
+      port: 5432
+  - to:
+    - podSelector:
+        matchLabels:
+          app: redis
+    ports:
+    - protocol: TCP
+      port: 6379
+  - to: []
+    ports:
+    - protocol: TCP
+      port: 443
+    - protocol: TCP
+      port: 80
+    - protocol: UDP
+      port: 53
+
+---
+# CronJob for scheduled security scans
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: comprehensive-security-scan
+  namespace: porsche-security
+spec:
+  schedule: "0 2 * * *"  # Daily at 2 AM
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          serviceAccountName: porsche-security-service-account
+          containers:
+          - name: security-scan
+            image: porsche/security-suite:1.0.0
+            command:
+            - /bin/sh
+            - -c
+            - |
+              node /app/scripts/comprehensive_test_orchestrator.js --scheduled
+            env:
+            - name: NODE_ENV
+              value: "production"
+            - name: CONFIG_FILE
+              value: "/etc/porsche-security/security-suite.conf"
+            volumeMounts:
+            - name: config-volume
+              mountPath: /etc/porsche-security
+              readOnly: true
+            - name: reports-volume
+              mountPath: /app/reports
+            resources:
+              requests:
+                memory: "512Mi"
+                cpu: "250m"
+              limits:
+                memory: "2Gi"
+                cpu: "1000m"
+          volumes:
+          - name: config-volume
+            configMap:
+              name: porsche-security-config
+          - name: reports-volume
+            persistentVolumeClaim:
+              claimName: security-reports-pvc
+          restartPolicy: OnFailure
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 1
+
+---
+# ServiceMonitor for Prometheus monitoring
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: porsche-security-metrics
+  namespace: porsche-security
+  labels:
+    app: porsche-security-suite
+spec:
+  selector:
+    matchLabels:
+      app: porsche-security-suite
+  endpoints:
+  - port: api
+    path: /metrics
+    interval: 30s
+    scrapeTimeout: 10s
